@@ -1,0 +1,5 @@
+{
+  "name": "SmartSheet Spend Tracker",
+  "description": "A modern expense tracking dashboard that ingests CSV/Sheet data and uses Gemini AI to auto-categorize transactions and provide intelligent financial insights.",
+  "requestFramePermissions": []
+}
