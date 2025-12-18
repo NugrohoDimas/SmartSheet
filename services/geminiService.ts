@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { Transaction } from '../types';
+import { Transaction, TransactionType } from '../types';
 import { CATEGORIES } from '../constants';
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -102,5 +102,59 @@ export const getFinancialInsights = async (transactions: Transaction[], userQuer
   } catch (error) {
     console.error("Error generating insight:", error);
     return "Sorry, I encountered an error analyzing your data.";
+  }
+};
+
+export const scanReceipt = async (base64Image: string): Promise<Partial<Transaction>> => {
+  try {
+    const response = await ai.models.generateContent({
+      model: MODEL_NAME,
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              mimeType: 'image/jpeg', // Assuming jpeg/png, standardizing
+              data: base64Image
+            }
+          },
+          {
+            text: `Extract data from this receipt. 
+            IMPORTANT: If the receipt contains multiple items, DO NOT return multiple objects.
+            Instead, aggregate them into ONE single transaction:
+            1. Sum up the Total Amount of all items.
+            2. Combine item names into a single Description (e.g., "Indomaret: Bread, Milk, Candy").
+            3. Choose the one Category that best fits the majority of items from this list: ${CATEGORIES.join(', ')}.
+            4. Extract the Date.
+
+            Return a single JSON object.`
+          }
+        ]
+      },
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            amount: { type: Type.NUMBER },
+            date: { type: Type.STRING },
+            description: { type: Type.STRING },
+            category: { type: Type.STRING }
+          }
+        }
+      }
+    });
+
+    const result = JSON.parse(response.text || '{}');
+    return {
+      amount: result.amount,
+      date: result.date,
+      description: result.description,
+      category: result.category,
+      type: TransactionType.EXPENSE // Receipts are usually expenses
+    };
+
+  } catch (error) {
+    console.error("Error scanning receipt:", error);
+    throw new Error("Could not extract data from image.");
   }
 };

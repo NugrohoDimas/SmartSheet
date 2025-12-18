@@ -1,8 +1,8 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import { Plus, LayoutDashboard, Table as TableIcon, MessageSquare, TrendingUp, TrendingDown, DollarSign, Link as LinkIcon, X, HelpCircle, RefreshCw, AlertTriangle, CheckCircle, Copy, Code, Wallet, Filter, Calendar } from 'lucide-react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { Plus, LayoutDashboard, Table as TableIcon, MessageSquare, TrendingUp, TrendingDown, DollarSign, Link as LinkIcon, X, HelpCircle, RefreshCw, AlertTriangle, CheckCircle, Copy, Code, Wallet, Filter, Calendar, Upload, Camera, Sparkles } from 'lucide-react';
 import { Transaction, TransactionType, SpendingSummary } from './types';
 import { CATEGORIES, COLORS } from './constants';
-import { categorizeTransactions } from './services/geminiService';
+import { categorizeTransactions, scanReceipt } from './services/geminiService';
 import SummaryCard from './components/SummaryCard';
 import { CategoryPieChart, MonthlyBarChart } from './components/Charts';
 import TransactionTable from './components/TransactionTable';
@@ -12,10 +12,12 @@ import ChatInterface from './components/ChatInterface';
 const APPS_SCRIPT_CODE = `function doGet(e) {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
   var data = sheet.getDataRange().getValues();
+  
+  if (data.length === 0) return ContentService.createTextOutput(JSON.stringify([])).setMimeType(ContentService.MimeType.JSON);
+
   var headers = data[0].map(function(h) { return h.toString().toLowerCase(); });
   var result = [];
   
-  // Map rows to objects
   for (var i = 1; i < data.length; i++) {
     var row = {};
     for (var j = 0; j < headers.length; j++) {
@@ -29,55 +31,74 @@ const APPS_SCRIPT_CODE = `function doGet(e) {
 }
 
 function doPost(e) {
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
-  // Parse text/plain to avoid CORS preflight issues
-  var data = JSON.parse(e.postData.contents);
-  var headers = sheet.getDataRange().getValues()[0].map(function(h) { return h.toString().toLowerCase(); });
+  var lock = LockService.getScriptLock();
+  lock.tryLock(10000);
   
-  if (data.action === "add") {
-    var newRow = [];
-    // Ensure we map data to correct columns
-    for (var i = 0; i < headers.length; i++) {
-      var key = headers[i];
-      if (key === 'id') {
-        newRow.push(data.transaction.id || 'id-' + new Date().getTime());
-      } else {
-        // Try exact key or lowercase, or empty string
-        var val = data.transaction[key] || data.transaction[key.toLowerCase()] || "";
+  try {
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
+    var data = JSON.parse(e.postData.contents);
+    
+    // Get Headers or Create if empty
+    var lastCol = sheet.getLastColumn();
+    var headers = [];
+    if (lastCol > 0) {
+      headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(function(h) { return h.toString().toLowerCase(); });
+    }
+
+    if (data.action === "add") {
+      var transaction = data.transaction;
+      var transKeys = Object.keys(transaction);
+      
+      // Dynamic Column Creation
+      for (var k = 0; k < transKeys.length; k++) {
+        var keyName = transKeys[k];
+        if (headers.indexOf(keyName.toLowerCase()) === -1) {
+           var newCol = headers.length + 1;
+           sheet.getRange(1, newCol).setValue(keyName.charAt(0).toUpperCase() + keyName.slice(1));
+           headers.push(keyName.toLowerCase()); 
+        }
+      }
+
+      var newRow = [];
+      for (var i = 0; i < headers.length; i++) {
+        var key = headers[i];
+        var val = transaction[key] || transaction[key.toLowerCase()] || "";
         newRow.push(val);
       }
-    }
-    sheet.appendRow(newRow);
-    return ContentService.createTextOutput(JSON.stringify({status: "success"}))
-      .setMimeType(ContentService.MimeType.JSON);
-  }
-  
-  if (data.action === "delete") {
-    var id = data.id;
-    var idColIndex = headers.indexOf("id");
-    var statusColIndex = headers.indexOf("status");
-    
-    // If Status column doesn't exist, create it
-    if (statusColIndex === -1) {
-      sheet.getRange(1, headers.length + 1).setValue("Status");
-      statusColIndex = headers.length; 
+      sheet.appendRow(newRow);
+      return ContentService.createTextOutput(JSON.stringify({status: "success"}))
+        .setMimeType(ContentService.MimeType.JSON);
     }
     
-    if (idColIndex === -1) return ContentService.createTextOutput(JSON.stringify({status: "error", message: "No ID column"}));
-    
-    var values = sheet.getDataRange().getValues();
-    // Find row and soft delete
-    for (var i = 1; i < values.length; i++) {
-      if (values[i][idColIndex] == id) {
-        // Update Status column to "Deleted" instead of removing row
-        sheet.getRange(i + 1, statusColIndex + 1).setValue("Deleted");
-        return ContentService.createTextOutput(JSON.stringify({status: "success"}))
-          .setMimeType(ContentService.MimeType.JSON);
+    if (data.action === "delete") {
+      var id = data.id;
+      var idColIndex = headers.indexOf("id");
+      var statusColIndex = headers.indexOf("status");
+      
+      if (statusColIndex === -1) {
+        sheet.getRange(1, headers.length + 1).setValue("Status");
+        statusColIndex = headers.length; 
+      }
+      
+      if (idColIndex === -1) return ContentService.createTextOutput(JSON.stringify({status: "error", message: "No ID column"}));
+      
+      var values = sheet.getDataRange().getValues();
+      for (var i = 1; i < values.length; i++) {
+        if (values[i][idColIndex] == id) {
+          sheet.getRange(i + 1, statusColIndex + 1).setValue("Deleted");
+          return ContentService.createTextOutput(JSON.stringify({status: "success"}))
+            .setMimeType(ContentService.MimeType.JSON);
+        }
       }
     }
+    
+    return ContentService.createTextOutput(JSON.stringify({status: "error", message: "Unknown action"}));
+    
+  } catch (e) {
+    return ContentService.createTextOutput(JSON.stringify({status: "error", message: e.toString()})).setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    lock.releaseLock();
   }
-  
-  return ContentService.createTextOutput(JSON.stringify({status: "error", message: "Unknown action"}));
 }`;
 
 // Robust CSV Parsing Helper
@@ -105,7 +126,7 @@ const parseCSV = (text: string): Transaction[] => {
   };
 
   let headerRowIndex = -1;
-  let colIndices = { date: -1, description: -1, amount: -1, id: -1, category: -1, type: -1, status: -1 };
+  let colIndices = { date: -1, description: -1, amount: -1, id: -1, category: -1, type: -1, status: -1, image: -1 };
 
   for (let i = 0; i < Math.min(lines.length, 10); i++) {
     const row = splitLine(lines[i]).map(c => c.toLowerCase());
@@ -117,17 +138,18 @@ const parseCSV = (text: string): Transaction[] => {
     const catIdx = row.findIndex(c => c.includes('category') || c.includes('kategori'));
     const typeIdx = row.findIndex(c => c.includes('type') || c.includes('tipe'));
     const statusIdx = row.findIndex(c => c.includes('status') || c.includes('state'));
+    const imageIdx = row.findIndex(c => c.includes('image') || c.includes('receipt') || c.includes('gambar') || c.includes('struk'));
 
     if (dateIdx !== -1 && amountIdx !== -1) {
       headerRowIndex = i;
-      colIndices = { date: dateIdx, amount: amountIdx, description: descIdx, id: idIdx, category: catIdx, type: typeIdx, status: statusIdx };
+      colIndices = { date: dateIdx, amount: amountIdx, description: descIdx, id: idIdx, category: catIdx, type: typeIdx, status: statusIdx, image: imageIdx };
       break;
     }
   }
 
   if (headerRowIndex === -1) {
     headerRowIndex = 0;
-    colIndices = { date: 0, description: 1, amount: 2, id: -1, category: -1, type: -1, status: -1 };
+    colIndices = { date: 0, description: 1, amount: 2, id: -1, category: -1, type: -1, status: -1, image: -1 };
   }
 
   const transactions: Transaction[] = [];
@@ -156,6 +178,7 @@ const parseCSV = (text: string): Transaction[] => {
     const idStr = colIndices.id !== -1 ? row[colIndices.id] : `sheet-${i}-${Math.random().toString(36).substr(2,5)}`;
     const catStr = colIndices.category !== -1 ? row[colIndices.category] : '';
     const typeStr = colIndices.type !== -1 ? row[colIndices.type] : '';
+    const imgStr = colIndices.image !== -1 ? row[colIndices.image] : '';
 
     // Handle Rupiah format if present in CSV
     let cleanAmountStr = amountStr.replace(/[$£€Rp]/g, '').replace(/,/g, '');
@@ -183,11 +206,51 @@ const parseCSV = (text: string): Transaction[] => {
       description: descStr,
       amount: Math.abs(amount),
       category: catStr || 'Uncategorized',
-      type: type
+      type: type,
+      image: imgStr
     });
   }
 
   return transactions;
+};
+
+// Helper to compress image
+const compressImage = (file: File): Promise<string> => {
+    return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = (event) => {
+            const img = new Image();
+            img.src = event.target?.result as string;
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                // Decreased max size to ensure it fits in Google Sheet cell (limit ~50k chars)
+                // 500x500 at 0.5 quality usually results in 20-30k chars
+                const MAX_WIDTH = 500;
+                const MAX_HEIGHT = 500;
+                let width = img.width;
+                let height = img.height;
+
+                if (width > height) {
+                    if (width > MAX_WIDTH) {
+                        height *= MAX_WIDTH / width;
+                        width = MAX_WIDTH;
+                    }
+                } else {
+                    if (height > MAX_HEIGHT) {
+                        width *= MAX_HEIGHT / height;
+                        height = MAX_HEIGHT;
+                    }
+                }
+
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                ctx?.drawImage(img, 0, 0, width, height);
+                resolve(canvas.toDataURL('image/jpeg', 0.5)); // Lower quality for storage
+            };
+        };
+    });
 };
 
 export default function App() {
@@ -353,7 +416,8 @@ export default function App() {
             description: row.description || 'Unknown',
             amount: Number(row.amount) || 0,
             category: row.category || 'Uncategorized',
-            type: (row.type && String(row.type).toLowerCase() === 'income') ? TransactionType.INCOME : TransactionType.EXPENSE
+            type: (row.type && String(row.type).toLowerCase() === 'income') ? TransactionType.INCOME : TransactionType.EXPENSE,
+            image: row.image || (row.receipt) || '' // Support 'image' or 'receipt' column
           }));
       } else {
         // CSV Fetch
@@ -442,8 +506,69 @@ export default function App() {
     amount: '', 
     date: new Date().toISOString().split('T')[0],
     type: TransactionType.EXPENSE,
-    category: CATEGORIES[0]
+    category: CATEGORIES[0],
+    image: ''
   });
+
+  const [isScanning, setIsScanning] = useState(false);
+
+  const resetAddForm = () => {
+    setNewTrans({ 
+      description: '', 
+      amount: '', 
+      date: new Date().toISOString().split('T')[0],
+      type: TransactionType.EXPENSE,
+      category: CATEGORIES[0],
+      image: ''
+    });
+    if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+    }
+  };
+
+  const handleCloseModal = () => {
+      setShowAddModal(false);
+      resetAddForm();
+  };
+
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      try {
+        const compressedBase64 = await compressImage(file);
+        setNewTrans(prev => ({ ...prev, image: compressedBase64 }));
+      } catch (err) {
+        showNotification("Failed to process image.", 'error');
+      }
+    }
+  };
+
+  const handleScanReceipt = async () => {
+    if (!newTrans.image) return;
+    setIsScanning(true);
+    // Remove data:image/jpeg;base64, prefix for API if using standard base64 logic, 
+    // but the library might handle it. 
+    // Actually standard library expects base64 string. 
+    // The current state has data url.
+    const base64Data = newTrans.image.split(',')[1];
+    
+    try {
+      const scannedData = await scanReceipt(base64Data);
+      setNewTrans(prev => ({
+        ...prev,
+        amount: scannedData.amount ? String(scannedData.amount) : prev.amount,
+        date: scannedData.date || prev.date,
+        description: scannedData.description || prev.description,
+        category: scannedData.category || prev.category,
+        type: scannedData.type || prev.type
+      }));
+      showNotification("Receipt summary scanned!", 'success');
+    } catch (error) {
+      showNotification("AI Scan failed. Please enter manually.", 'error');
+    } finally {
+      setIsScanning(false);
+    }
+  };
 
   const handleAddSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -456,7 +581,8 @@ export default function App() {
       amount: parseFloat(newTrans.amount),
       date: newTrans.date,
       type: newTrans.type,
-      category: newTrans.category
+      category: newTrans.category,
+      image: newTrans.image
     };
 
     // Optimistic update
@@ -486,13 +612,7 @@ export default function App() {
       showNotification('Transaction added locally.', 'success');
     }
 
-    setNewTrans({ 
-      description: '', 
-      amount: '', 
-      date: new Date().toISOString().split('T')[0],
-      type: TransactionType.EXPENSE,
-      category: CATEGORIES[0]
-    });
+    resetAddForm();
     setIsProcessing(false);
   };
 
@@ -502,6 +622,7 @@ export default function App() {
   };
 
   const [setupTab, setSetupTab] = useState<'simple' | 'advanced'>('simple');
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   return (
     <div className="min-h-screen flex flex-col md:flex-row bg-[#f3f4f6]">
@@ -795,11 +916,48 @@ export default function App() {
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-md p-6">
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-xl font-bold text-gray-900">Add Transaction</h2>
-              <button onClick={() => setShowAddModal(false)} className="text-gray-400 hover:text-gray-600">
+              <button onClick={handleCloseModal} className="text-gray-400 hover:text-gray-600">
                 <X size={24} />
               </button>
             </div>
             <form onSubmit={handleAddSubmit} className="space-y-4">
+              
+              {/* Receipt Upload Section */}
+              <div className="border-2 border-dashed border-gray-300 rounded-xl p-4 text-center hover:bg-gray-50 transition-colors relative">
+                  <input 
+                    type="file" 
+                    accept="image/*"
+                    ref={fileInputRef}
+                    onChange={handleImageUpload}
+                    className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                  />
+                  {newTrans.image ? (
+                    <div className="relative">
+                       <img src={newTrans.image} alt="Receipt Preview" className="h-32 mx-auto object-contain rounded-md" />
+                       <p className="text-xs text-green-600 mt-2 font-medium">Image uploaded</p>
+                       <button 
+                         type="button"
+                         onClick={(e) => {
+                           e.preventDefault();
+                           e.stopPropagation();
+                           handleScanReceipt();
+                         }}
+                         disabled={isScanning}
+                         className="absolute bottom-2 right-2 bg-indigo-600 text-white px-3 py-1 text-xs rounded-full shadow-lg flex items-center gap-1 hover:bg-indigo-700 z-10"
+                       >
+                         {isScanning ? <RefreshCw className="animate-spin" size={12} /> : <Sparkles size={12} />}
+                         {isScanning ? 'Scanning...' : 'Scan with AI'}
+                       </button>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center gap-2 text-gray-500 py-2">
+                       <Camera size={24} />
+                       <span className="text-sm font-medium">Upload Receipt (Optional)</span>
+                       <span className="text-xs text-gray-400">Click to upload or take photo</span>
+                    </div>
+                  )}
+              </div>
+
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
                 <input 
@@ -864,7 +1022,7 @@ export default function App() {
               <div className="flex justify-end gap-3 mt-6">
                 <button 
                   type="button" 
-                  onClick={() => setShowAddModal(false)}
+                  onClick={handleCloseModal}
                   className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg font-medium"
                 >
                   Cancel
@@ -936,7 +1094,7 @@ export default function App() {
                          <Code size={16} /> Setup Two-Way Sync (Apps Script):
                       </h3>
                       <div className="text-sm text-indigo-700 mb-2 bg-indigo-100 p-2 rounded border border-indigo-200">
-                        <strong>Important:</strong> If the "Soft Delete" feature isn't working (rows are still being deleted), you must <strong>copy the new code below</strong> and deploy a <strong>New Version</strong> in Apps Script.
+                        <strong>Important:</strong> You must <strong>update your Apps Script code</strong> to support Image upload and dynamic columns!
                       </div>
                       <ol className="list-decimal list-inside text-sm text-indigo-700 space-y-2 ml-1">
                         <li>Open your Google Sheet</li>
@@ -965,8 +1123,7 @@ export default function App() {
                    <div className="flex items-center gap-2 p-3 bg-yellow-50 text-yellow-800 rounded-lg text-xs">
                       <AlertTriangle size={16} className="flex-shrink-0" />
                       <div>
-                        Ensure your sheet has these headers: <strong>ID, Date, Description, Amount, Category, Type</strong>. 
-                        The script will automatically add a <strong>Status</strong> column to handle soft deletes.
+                        The script will now <strong>automatically create</strong> an "Image" column in your sheet if it doesn't exist when you upload a receipt.
                       </div>
                    </div>
                 </div>

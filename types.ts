@@ -10,6 +10,7 @@ export interface Transaction {
   amount: number;
   category: string;
   type: TransactionType;
+  image?: string; // Base64 string of the receipt
 }
 
 export interface SpendingSummary {
